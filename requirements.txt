@@ -1,0 +1,4 @@
+construct
+fastapi[standard]
+pydantic
+uvicorn
