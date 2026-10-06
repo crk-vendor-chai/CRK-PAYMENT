@@ -10,55 +10,105 @@ to the CAT device and processing responses. All commands include:
 - Request/response logging
 
 Timeout behavior:
-- Uses COMM_TIMEOUT from config (default 30 seconds)
+- Uses COMM_TIMEOUT from config (default 120 seconds)
 - Raises TimeoutError if device doesn't respond in time
 - Can be overridden per-command if needed
 """
 
 import logging
+from collections.abc import Sequence
 
 from construct import ConstructError
 
 from exceptions import ProtocolError, ValidationError
 
-from .payment_types import (
-    DeviceCheckData,
-    TxSPayApprovalData,
-    TxSPayCancelData,
-    TxTokenApprovalData,
-    TxTokenCancelData,
-    TxTokenData,
-)
-
 from .const import (
     AuthorizationType,
     MessageType,
+    ResponseCode,
     ServiceCode,
-    build_card_info_data,
 )
 from .manager import Communication
+from .models import (
+    CardInfo,
+    DeviceCheckResult,
+    DeviceInitiatedRequest,
+    PaymentItem,
+    SamsungPayApprovalResult,
+    SamsungPayCancelResult,
+    TokenApprovalResult,
+    TokenCancelResult,
+    TokenGenerationResult,
+)
 from .payload import (
-    ItemInfo,
     DeviceCheckRequest,
     DeviceCheckResponse,
     ErrorPayload,
+    ItemInfo,
+    TransactionRFIDInitializeRequest,
     TransactionSPayApproveRequest,
     TransactionSPayApproveResponse,
     TransactionSPayCancelRequest,
     TransactionSPayCancelResponse,
-    TransactionSPayInitilizeRequest,
+    TransactionSPayInitializeRequest,
     TransactionTokenApproveRequest,
     TransactionTokenApproveResponse,
     TransactionTokenCancelRequest,
     TransactionTokenCancelResponse,
     TransactionTokenGenerateRequest,
     TransactionTokenGenerateResponse,
-    TransactionTokenInitilizeRequest,
-    TransactionRFIDInitilizeRequest,
+    TransactionTokenInitializeRequest,
 )
-from .structure import Protocol
+from .structure import ProtocolFrame
 
 logger = logging.getLogger(__name__)
+
+
+def _to_card_info(card_info) -> CardInfo | None:
+    if card_info is None or isinstance(card_info, str):
+        return None
+    return CardInfo(
+        serial_number=card_info.serial_number,
+        acquirer_id=card_info.acquirer_id,
+        acquirer_name=card_info.acquirer_name,
+        issuer_id=card_info.issuer_id,
+        issuer_name=card_info.issuer_name,
+        merchant_id=card_info.merchant_id,
+        date_time=card_info.date_time,
+    )
+
+
+def _build_item_message(items: Sequence[PaymentItem]) -> bytes:
+    chunks = []
+    for item in items:
+        name = item.name.encode("euc-kr", errors="ignore")[:10].ljust(10, b"\x00")
+        quantity = str(item.quantity).encode("ascii")[:2].ljust(2, b"\x00")
+        total_price = str(item.total_price).encode("ascii")[:6].ljust(6, b"\x00")
+        chunks.append(
+            ItemInfo.build(
+                {
+                    "name": name,
+                    "quantity": quantity,
+                    "total_price": total_price,
+                }
+            )
+        )
+    return b"".join(chunks)
+
+
+def _log_payment_recovery(service_code: ServiceCode, **fields) -> None:
+    """Write unmasked payment identifiers needed for manual recovery."""
+    field_text = " ".join(f"{name}={value}" for name, value in fields.items())
+    logger.info(
+        "PAYMENT_RECOVERY service_code=%s %s",
+        service_code.value,
+        field_text,
+        extra={
+            "payment_recovery": True,
+            "service_code": service_code.value,
+            **fields,
+        },
+    )
 
 
 def _validate_amount(amount: str, field_name: str = "amount") -> None:
@@ -181,7 +231,7 @@ def _validate_response(
         )
 
 
-async def retrieve_request(comm: Communication):
+async def retrieve_request(comm: Communication) -> DeviceInitiatedRequest:
     while True:
         message = await comm.read_request()
 
@@ -192,11 +242,11 @@ async def retrieve_request(comm: Communication):
         service_code = ServiceCode(message.service_code)
 
         if service_code == ServiceCode.TX_TOKEN_INIT:
-            payload_struct = TransactionTokenInitilizeRequest
+            payload_struct = TransactionTokenInitializeRequest
         elif service_code == ServiceCode.TX_SPAY_INIT:
-            payload_struct = TransactionSPayInitilizeRequest
+            payload_struct = TransactionSPayInitializeRequest
         elif service_code == ServiceCode.TX_RFID_INIT:
-            payload_struct = TransactionRFIDInitilizeRequest
+            payload_struct = TransactionRFIDInitializeRequest
         else:
             logger.error("Service code %s not implemented yet", service_code)
             continue
@@ -204,14 +254,22 @@ async def retrieve_request(comm: Communication):
         break
 
     payload = payload_struct.parse(message.payload)
+    rfid_data = (
+        payload.data
+        if service_code == ServiceCode.TX_RFID_INIT
+        else None
+    )
 
-    return message, payload
+    return DeviceInitiatedRequest(
+        service_code=service_code,
+        rfid_data=rfid_data,
+    )
 
 
 async def send_tx_token_generate(
     comm: Communication,
     timeout: float | None = None,
-) -> TxTokenData:
+) -> TokenGenerationResult:
     """
     Request token generation from CAT device.
     
@@ -234,7 +292,7 @@ async def send_tx_token_generate(
             "message": "",
         }
     )
-    request = Protocol.build(
+    request = ProtocolFrame.build(
         {
             "service_code": ServiceCode.TX_TOKEN_GENERATE.value,
             "message_type": MessageType.REQUEST,
@@ -242,7 +300,11 @@ async def send_tx_token_generate(
         }
     )
     
-    response = await comm.fetch(request, timeout=timeout)
+    response = await comm.fetch(
+        request,
+        timeout=timeout,
+        control_handshake=True,
+    )
     _validate_response(response, ServiceCode.TX_TOKEN_GENERATE)
     
     try:
@@ -251,6 +313,14 @@ async def send_tx_token_generate(
         raise ProtocolError(
             response.payload.decode('euc-kr', errors='ignore')
         ) from e
+
+    _log_payment_recovery(
+        ServiceCode.TX_TOKEN_GENERATE,
+        phase="response",
+        vankey_hash=response_payload.vankey_hash,
+        status=response_payload.status.name,
+        response_code=response_payload.response_code.name,
+    )
     
     logger.info(
         "Token generated",
@@ -260,10 +330,10 @@ async def send_tx_token_generate(
         },
     )
     
-    return TxTokenData(
+    return TokenGenerationResult(
         status=response_payload.status,
         vankey_hash=response_payload.vankey_hash,
-        card_info=build_card_info_data(response_payload.card_info),
+        card_info=_to_card_info(response_payload.card_info),
         response_code=response_payload.response_code,
         message=response_payload.message,
     )
@@ -273,9 +343,9 @@ async def send_tx_token_approve(
     comm: Communication,
     amount: str,
     vankey_hash: str,
-    items: list[dict],
+    items: Sequence[PaymentItem],
     timeout: float | None = None,
-) -> TxTokenApprovalData:
+) -> TokenApprovalResult:
     """
     Approve token payment transaction.
     
@@ -296,23 +366,20 @@ async def send_tx_token_approve(
         CommunicationError: If communication fails
     """
     _validate_amount(amount)
+
+    _log_payment_recovery(
+        ServiceCode.TX_TOKEN_APPROVE,
+        phase="request",
+        amount=amount,
+        vankey_hash=vankey_hash,
+    )
     
     logger.debug(
         "Sending TX_TOKEN_APPROVE request",
         extra={"amount": amount, "vankey_hash_len": len(vankey_hash)},
     )
 
-    message = b''
-
-    for item in items:
-        name = str(item.get("name", "")).encode("euc-kr", errors="ignore")[:10].ljust(10, b'\x00')
-        quantity = str(item.get("quantity", 0)).encode("ascii", errors="ignore")[:2].ljust(2, b'\x00')
-        total_price = str(item.get("total_price", "")).encode("ascii", errors="ignore")[:6].ljust(6, b'\x00')
-        message += ItemInfo.build({
-            "name": name,
-            "quantity": quantity,
-            "total_price": total_price,
-        })
+    message = _build_item_message(items)
     
     request_payload = TransactionTokenApproveRequest.build(
         {
@@ -321,7 +388,7 @@ async def send_tx_token_approve(
             "message": message,
         }
     )
-    request = Protocol.build(
+    request = ProtocolFrame.build(
         {
             "service_code": ServiceCode.TX_TOKEN_APPROVE.value,
             "message_type": MessageType.REQUEST,
@@ -329,7 +396,11 @@ async def send_tx_token_approve(
         }
     )
     
-    response = await comm.fetch(request, timeout=timeout)
+    response = await comm.fetch(
+        request,
+        timeout=timeout,
+        control_handshake=True,
+    )
     _validate_response(response, ServiceCode.TX_TOKEN_APPROVE)
     
     try:
@@ -338,6 +409,17 @@ async def send_tx_token_approve(
         raise ProtocolError(
             response.payload.decode('euc-kr', errors='ignore')
         ) from e  
+
+    _log_payment_recovery(
+        ServiceCode.TX_TOKEN_APPROVE,
+        phase="response",
+        amount=amount,
+        authorization_number=response_payload.authorization_number,
+        vankey=response_payload.vankey,
+        vankey_hash=vankey_hash,
+        status=response_payload.status.name,
+        response_code=response_payload.response_code.name,
+    )
     
     logger.info(
         "Token payment approved",
@@ -348,10 +430,10 @@ async def send_tx_token_approve(
         },
     )
     
-    return TxTokenApprovalData(
+    return TokenApprovalResult(
         status=response_payload.status,
         authorization_number=response_payload.authorization_number,
-        card_info=build_card_info_data(response_payload.card_info),
+        card_info=_to_card_info(response_payload.card_info),
         vankey=response_payload.vankey,
         response_code=response_payload.response_code,
         message=response_payload.message,
@@ -365,7 +447,7 @@ async def send_tx_token_cancel(
     original_authorization_date: str,
     vankey_hash: str,
     timeout: float | None = None,
-) -> TxTokenCancelData:
+) -> TokenCancelResult:
     """
     Cancel token payment transaction.
     
@@ -389,6 +471,15 @@ async def send_tx_token_cancel(
     _validate_amount(amount)
     _validate_authorization_number(original_authorization_number, "original_authorization_number")
     _validate_authorization_date(original_authorization_date, "original_authorization_date")
+
+    _log_payment_recovery(
+        ServiceCode.TX_TOKEN_CANCEL,
+        phase="request",
+        amount=amount,
+        original_authorization_number=original_authorization_number,
+        original_authorization_date=original_authorization_date,
+        vankey_hash=vankey_hash,
+    )
     
     logger.debug(
         "Sending TX_TOKEN_CANCEL request",
@@ -407,7 +498,7 @@ async def send_tx_token_cancel(
             "vankey_hash": vankey_hash,
         }
     )
-    request = Protocol.build(
+    request = ProtocolFrame.build(
         {
             "service_code": ServiceCode.TX_TOKEN_CANCEL.value,
             "message_type": MessageType.REQUEST,
@@ -415,7 +506,11 @@ async def send_tx_token_cancel(
         }
     )
     
-    response = await comm.fetch(request, timeout=timeout)
+    response = await comm.fetch(
+        request,
+        timeout=timeout,
+        control_handshake=True,
+    )
     _validate_response(response, ServiceCode.TX_TOKEN_CANCEL)
     
     try:
@@ -424,6 +519,18 @@ async def send_tx_token_cancel(
         raise ProtocolError(
             response.payload.decode('euc-kr', errors='ignore')
         ) from e  
+
+    _log_payment_recovery(
+        ServiceCode.TX_TOKEN_CANCEL,
+        phase="response",
+        amount=amount,
+        original_authorization_number=original_authorization_number,
+        original_authorization_date=original_authorization_date,
+        vankey=response_payload.vankey,
+        vankey_hash=vankey_hash,
+        status=response_payload.status.name,
+        response_code=response_payload.response_code.name,
+    )
     
     logger.info(
         "Token payment cancelled",
@@ -433,9 +540,9 @@ async def send_tx_token_cancel(
         },
     )
     
-    return TxTokenCancelData(
+    return TokenCancelResult(
         status=response_payload.status,
-        card_info=build_card_info_data(response_payload.card_info),
+        card_info=_to_card_info(response_payload.card_info),
         vankey=response_payload.vankey,
         response_code=response_payload.response_code,
         message=response_payload.message,
@@ -446,9 +553,9 @@ async def send_tx_spay_approve(
     comm: Communication,
     amount: str,
     authorization_type: AuthorizationType,
-    items: list[dict],
+    items: Sequence[PaymentItem],
     timeout: float | None = None,
-) -> TxSPayApprovalData:
+) -> SamsungPayApprovalResult:
     """
     Approve Samsung Pay transaction.
     
@@ -478,17 +585,7 @@ async def send_tx_spay_approve(
         },
     )
 
-    message = b''
-
-    for item in items:
-        name = str(item.get("name", "")).encode("euc-kr", errors="ignore")[:10].ljust(10, b'\x00')
-        quantity = str(item.get("quantity", 0)).encode("ascii", errors="ignore")[:2].ljust(2, b'\x00')
-        total_price = str(item.get("total_price", "")).encode("ascii", errors="ignore")[:6].ljust(6, b'\x00')
-        message += ItemInfo.build({
-            "name": name,
-            "quantity": quantity,
-            "total_price": total_price,
-        })
+    message = _build_item_message(items)
     
     request_payload = TransactionSPayApproveRequest.build(
         {
@@ -497,7 +594,7 @@ async def send_tx_spay_approve(
             "message": message,
         }
     )
-    request = Protocol.build(
+    request = ProtocolFrame.build(
         {
             "service_code": ServiceCode.TX_SPAY_APPROVE.value,
             "message_type": MessageType.REQUEST,
@@ -505,7 +602,11 @@ async def send_tx_spay_approve(
         }
     )
     
-    response = await comm.fetch(request, timeout=timeout)
+    response = await comm.fetch(
+        request,
+        timeout=timeout,
+        control_handshake=True,
+    )
     _validate_response(response, ServiceCode.TX_SPAY_APPROVE)
     
     try:
@@ -514,21 +615,31 @@ async def send_tx_spay_approve(
         raise ProtocolError(
             response.payload.decode('euc-kr', errors='ignore')
         ) from e  
+
+    _log_payment_recovery(
+        ServiceCode.TX_SPAY_APPROVE,
+        phase="response",
+        amount=amount,
+        authorization_type=authorization_type.name,
+        authorization_number=response_payload.authorization_number,
+        vankey=response_payload.vankey,
+        status=response_payload.status.name,
+        response_code=response_payload.response_code.name,
+    )
     
     logger.info(
         "Samsung Pay approved",
         extra={
             "status": response_payload.status,
             "auth_number": response_payload.authorization_number,
-            "vankey": response_payload.vankey,
             "response_code": response_payload.response_code.name,
         },
     )
     
-    return TxSPayApprovalData(
+    return SamsungPayApprovalResult(
         status=response_payload.status,
         authorization_number=response_payload.authorization_number,
-        card_info=build_card_info_data(response_payload.card_info),
+        card_info=_to_card_info(response_payload.card_info),
         vankey=response_payload.vankey,
         response_code=response_payload.response_code,
         message=response_payload.message,
@@ -542,7 +653,7 @@ async def send_tx_spay_cancel(
     original_authorization_date: str,
     vankey: str,
     timeout: float | None = None,
-) -> TxSPayCancelData:
+) -> SamsungPayCancelResult:
     """
     Cancel Samsung Pay transaction.
     
@@ -566,6 +677,15 @@ async def send_tx_spay_cancel(
     _validate_amount(amount)
     _validate_authorization_number(original_authorization_number, "original_authorization_number")
     _validate_authorization_date(original_authorization_date, "original_authorization_date")
+
+    _log_payment_recovery(
+        ServiceCode.TX_SPAY_CANCEL,
+        phase="request",
+        amount=amount,
+        original_authorization_number=original_authorization_number,
+        original_authorization_date=original_authorization_date,
+        vankey=vankey,
+    )
     
     logger.debug(
         "Sending TX_SPAY_CANCEL request",
@@ -584,7 +704,7 @@ async def send_tx_spay_cancel(
             "vankey": vankey,
         }
     )
-    request = Protocol.build(
+    request = ProtocolFrame.build(
         {
             "service_code": ServiceCode.TX_SPAY_CANCEL.value,
             "message_type": MessageType.REQUEST,
@@ -592,7 +712,11 @@ async def send_tx_spay_cancel(
         }
     )
     
-    response = await comm.fetch(request, timeout=timeout)
+    response = await comm.fetch(
+        request,
+        timeout=timeout,
+        control_handshake=True,
+    )
     _validate_response(response, ServiceCode.TX_SPAY_CANCEL)
 
     try:
@@ -601,6 +725,18 @@ async def send_tx_spay_cancel(
         raise ProtocolError(
             response.payload.decode('euc-kr', errors='ignore')
         ) from e  
+
+    _log_payment_recovery(
+        ServiceCode.TX_SPAY_CANCEL,
+        phase="response",
+        amount=amount,
+        original_authorization_number=original_authorization_number,
+        original_authorization_date=original_authorization_date,
+        vankey=vankey,
+        response_vankey=response_payload.vankey,
+        status=response_payload.status.name,
+        response_code=response_payload.response_code.name,
+    )
     
     
     logger.info(
@@ -611,9 +747,9 @@ async def send_tx_spay_cancel(
         },
     )
     
-    return TxSPayCancelData(
+    return SamsungPayCancelResult(
         status=response_payload.status,
-        card_info=build_card_info_data(response_payload.card_info),
+        card_info=_to_card_info(response_payload.card_info),
         vankey=response_payload.vankey,
         response_code=response_payload.response_code,
         message=response_payload.message,
@@ -623,7 +759,7 @@ async def send_tx_spay_cancel(
 async def send_device_check(
     comm: Communication,
     timeout: float | None = None,
-) -> DeviceCheckData:
+) -> DeviceCheckResult:
     """
     Perform device health check.
     
@@ -646,7 +782,7 @@ async def send_device_check(
             "message": "",
         }
     )
-    request = Protocol.build(
+    request = ProtocolFrame.build(
         {
             "service_code": ServiceCode.DEVICE_CHECK.value,
             "message_type": MessageType.REQUEST,
@@ -659,17 +795,43 @@ async def send_device_check(
     
     try:
         response_payload = DeviceCheckResponse.parse(response.payload)
-    except ConstructError as e:
-        raise ProtocolError(
-            response.payload.decode('euc-kr', errors='ignore')
-        ) from e  
+        logger.info(
+            "Device check complete",
+            extra={"response_code": response_payload.response_code.name},
+        )
+        return DeviceCheckResult(
+            response_code=response_payload.response_code,
+        )
+    except ConstructError:
+        pass
+
+    try:
+        error_payload = ErrorPayload.parse(response.payload)
+        logger.info(
+            "Device check error",
+            extra={
+                "response_code": error_payload.response_code.name,
+                "message": error_payload.message,
+            },
+        )
+        return DeviceCheckResult(
+            response_code=error_payload.response_code,
+        )
+    except ConstructError:
+        pass
+        # raise ProtocolError(
+        #     response.payload.decode('euc-kr', errors='ignore')
+        # ) from e  
         
-    
+    response_payload = DeviceCheckResponse.parse(
+        DeviceCheckResponse.build({
+            "response_code": ResponseCode.SERVICE_UNAVAILABLE,
+        })
+    )
     logger.info(
         "Device check complete",
         extra={"response_code": response_payload.response_code.name},
     )
-    
-    return DeviceCheckData(
+    return DeviceCheckResult(
         response_code=response_payload.response_code,
     )

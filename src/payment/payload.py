@@ -9,35 +9,40 @@ from construct import (
     Struct,
 )
 
-from .const import (
-    FS,
-    RS,
-    Construct_AuthorizationType,
-    Construct_ResponseCode,
-    Construct_StatusCode,
+from .const import FS, RS
+from .structure import (
+    AuthorizationTypeField,
+    ResponseCodeField,
+    StatusCodeField,
 )
+
+
+def _terminated_string(encoding, terminator):
+    return NullTerminated(GreedyString(encoding), term=terminator)
+
+
+def _terminated_bytes(terminator):
+    return NullTerminated(GreedyBytes, term=terminator)
+
+
+# Common payload structures
 
 ErrorPayload = Struct(
     "status" / Const(b"N"),
     Const(FS),
-    "response_code" / Construct_ResponseCode,
+    "response_code" / ResponseCodeField,
     Const(RS),
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
 
 CardInfo = Struct(
-    "serial_number" / NullTerminated(GreedyString("ascii"), term=RS),
-    # Const(RS),
-    "acquirer_id" / NullTerminated(GreedyString("ascii"), term=RS),
-    # Const(RS),
-    "acquirer_name" / NullTerminated(GreedyString("euc-kr"), term=RS),
-    # Const(RS),
-    "issuer_id" / NullTerminated(GreedyString("ascii"), term=RS),
-    # Const(RS),
-    "issuer_name" / NullTerminated(GreedyString("euc-kr"), term=RS),
-    # Const(RS),
-    "merchant_id" / GreedyString("ascii"),
+    "serial_number" / _terminated_string("ascii", RS),
+    "acquirer_id" / _terminated_string("ascii", RS),
+    "acquirer_name" / _terminated_string("euc-kr", RS),
+    "issuer_id" / _terminated_string("ascii", RS),
+    "issuer_name" / _terminated_string("euc-kr", RS),
+    "merchant_id" / _terminated_string("ascii", RS),
+    "date_time" / GreedyString("ascii"),
 )
 
 ItemInfo = Struct(
@@ -46,69 +51,64 @@ ItemInfo = Struct(
     "total_price" / Bytes(6),
 )
 
+
+# Age check
+
 AgeCheckRequest = Struct(
     Const(FS),
 )
+
 AgeCheckResponse = Struct(
     Const(FS),
-    "qr_data" / NullTerminated(GreedyBytes, term=FS),
-    # Const(FS),
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "qr_data" / _terminated_bytes(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
 
-TransactionTokenInitilizeRequest = Struct(
+
+# Token transactions
+
+TransactionTokenInitializeRequest = Struct(
     Const(FS),
 )
-TransactionTokenInitilizeResponse = Struct(
+
+TransactionTokenInitializeResponse = Struct(
     Const(FS),
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
 
 TransactionTokenGenerateRequest = Struct(
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
+
 TransactionTokenGenerateResponse = Struct(
-    "status" / Construct_StatusCode,
+    "status" / StatusCodeField,
     Const(FS),
-    "vankey_hash" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
+    "vankey_hash" / _terminated_string("ascii", FS),
     "card_info" / NullTerminated(Select(CardInfo, GreedyString("ascii")), term=FS),
-    # Const(FS),
-    "response_code" / Construct_ResponseCode,
+    "response_code" / ResponseCodeField,
     Const(RS),
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
 
 TransactionTokenApproveRequest = Struct(
-    "amount" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
-    "vankey_hash" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
-    "message" / NullTerminated(GreedyBytes, term=FS),
-    # Const(FS),
+    "amount" / _terminated_string("ascii", FS),
+    "vankey_hash" / _terminated_string("ascii", FS),
+    "message" / _terminated_bytes(FS),
 )
+
 TransactionTokenApproveResponse = Struct(
-    "status" / Construct_StatusCode,
+    "status" / StatusCodeField,
     Const(FS),
-    "authorization_number" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
+    "authorization_number" / _terminated_string("ascii", FS),
     "card_info" / NullTerminated(Select(CardInfo, GreedyString("ascii")), term=FS),
-    # Const(FS),
-    "vankey" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
-    "response_code" / Construct_ResponseCode,
+    "vankey" / _terminated_string("ascii", FS),
+    "response_code" / ResponseCodeField,
     Const(RS),
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
 
 TransactionTokenCancelRequest = Struct(
-    "amount" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
+    "amount" / _terminated_string("ascii", FS),
     "original_authorization_number" / PaddedString(8, "ascii"),
     Const(FS),
     "original_authorization_date" / PaddedString(6, "ascii"),
@@ -116,59 +116,57 @@ TransactionTokenCancelRequest = Struct(
     "vankey_hash" / PaddedString(24, "ascii"),
     Const(FS),
 )
+
 TransactionTokenCancelResponse = Struct(
-    "status" / Construct_StatusCode,
+    "status" / StatusCodeField,
     Const(FS),
     "card_info" / NullTerminated(Select(CardInfo, GreedyString("ascii")), term=FS),
-    # Const(FS),
-    "vankey" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
-    "response_code" / Construct_ResponseCode,
+    "vankey" / _terminated_string("ascii", FS),
+    "response_code" / ResponseCodeField,
     Const(RS),
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
 
-TransactionRFIDInitilizeRequest = Struct(
+
+# RFID
+
+TransactionRFIDInitializeRequest = Struct(
     "data" / PaddedString(10, "ascii"),
     Const(FS),
 )
 
-TransactionSPayInitilizeRequest = Struct(
+
+# Samsung Pay transactions
+
+TransactionSPayInitializeRequest = Struct(
     Const(FS),
 )
-TransactionSPayInitilizeResponse = Struct(
+
+TransactionSPayInitializeResponse = Struct(
     Const(FS),
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
 
 TransactionSPayApproveRequest = Struct(
-    "amount" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
-    "authorization_type" / Construct_AuthorizationType,
+    "amount" / _terminated_string("ascii", FS),
+    "authorization_type" / AuthorizationTypeField,
     Const(FS),
-    "message" / NullTerminated(GreedyBytes, term=FS),
-    # Const(FS),
+    "message" / _terminated_bytes(FS),
 )
+
 TransactionSPayApproveResponse = Struct(
-    "status" / Construct_StatusCode,
+    "status" / StatusCodeField,
     Const(FS),
-    "authorization_number" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
-    "vankey" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
+    "authorization_number" / _terminated_string("ascii", FS),
+    "vankey" / _terminated_string("ascii", FS),
     "card_info" / NullTerminated(Select(CardInfo, GreedyString("ascii")), term=FS),
-    # Const(FS),
-    "response_code" / Construct_ResponseCode,
+    "response_code" / ResponseCodeField,
     Const(RS),
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
 
 TransactionSPayCancelRequest = Struct(
-    "amount" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
+    "amount" / _terminated_string("ascii", FS),
     "original_authorization_number" / PaddedString(8, "ascii"),
     Const(FS),
     "original_authorization_date" / PaddedString(6, "ascii"),
@@ -176,24 +174,25 @@ TransactionSPayCancelRequest = Struct(
     "vankey" / PaddedString(16, "ascii"),
     Const(FS),
 )
+
 TransactionSPayCancelResponse = Struct(
-    "status" / Construct_StatusCode,
+    "status" / StatusCodeField,
     Const(FS),
     "card_info" / NullTerminated(Select(CardInfo, GreedyString("ascii")), term=FS),
-    # Const(FS),
-    "vankey" / NullTerminated(GreedyString("ascii"), term=FS),
-    # Const(FS),
-    "response_code" / Construct_ResponseCode,
+    "vankey" / _terminated_string("ascii", FS),
+    "response_code" / ResponseCodeField,
     Const(RS),
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
 
+
+# Device
+
 DeviceCheckRequest = Struct(
-    "message" / NullTerminated(GreedyString("euc-kr"), term=FS),
-    # Const(FS),
+    "message" / _terminated_string("euc-kr", FS),
 )
+
 DeviceCheckResponse = Struct(
-    "response_code" / Construct_ResponseCode,
+    "response_code" / ResponseCodeField,
     Const(FS),
 )

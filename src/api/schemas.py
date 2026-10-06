@@ -13,9 +13,7 @@ All models include:
 
 from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
-
-from payment.const import CardInfoData
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 # ============================================================================
@@ -82,6 +80,34 @@ class ProblemDetail(BaseModel):
 # ============================================================================
 # Common Models
 # ============================================================================
+
+
+class CardInfoData(BaseModel):
+    """Card information exposed by the REST and SSE boundaries."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    SERIAL_NUMBER: str = Field(
+        validation_alias=AliasChoices("SERIAL_NUMBER", "serial_number")
+    )
+    ACQUIRER_ID: str = Field(
+        validation_alias=AliasChoices("ACQUIRER_ID", "acquirer_id")
+    )
+    ACQUIRER_NAME: str = Field(
+        validation_alias=AliasChoices("ACQUIRER_NAME", "acquirer_name")
+    )
+    ISSUER_ID: str = Field(
+        validation_alias=AliasChoices("ISSUER_ID", "issuer_id")
+    )
+    ISSUER_NAME: str = Field(
+        validation_alias=AliasChoices("ISSUER_NAME", "issuer_name")
+    )
+    MERCHANT_ID: str = Field(
+        validation_alias=AliasChoices("MERCHANT_ID", "merchant_id")
+    )
+    DATE_TIME: str = Field(
+        validation_alias=AliasChoices("DATE_TIME", "date_time")
+    )
 
 
 class Item(BaseModel):
@@ -216,14 +242,15 @@ class PaymentTokenApproveResponse(BaseModel):
                 {
                     "status": "Y",
                     "authorization_number": "12345678",
-                    "authorization_date": "260123",
+                    "authorization_date": "260123235959",
                     "card_info": {
                         "SERIAL_NUMBER": "1234567890123456",
                         "ACQUIRER_ID": "001",
                         "ACQUIRER_NAME": "신한카드",
                         "ISSUER_ID": "002",
                         "ISSUER_NAME": "KB국민카드",
-                        "MERCHANT_ID": "MERCHANT001"
+                        "MERCHANT_ID": "MERCHANT001",
+                        "DATE_TIME": "260123235959"
                     },
                     "vankey": "VANKEY1234567890ABCDEFGH",
                     "response_code": 0,
@@ -232,7 +259,7 @@ class PaymentTokenApproveResponse(BaseModel):
                 {
                     "status": "N",
                     "authorization_number": None,
-                    "authorization_date": "260123",
+                    "authorization_date": None,
                     "card_info": None,
                     "vankey": None,
                     "response_code": 201,
@@ -244,7 +271,7 @@ class PaymentTokenApproveResponse(BaseModel):
     
     status: str
     authorization_number: Optional[str]
-    authorization_date: str
+    authorization_date: Optional[str]
     card_info: Optional[CardInfoData]
     vankey: Optional[str]
     response_code: int
@@ -463,14 +490,15 @@ class SamsungPayApproveResponse(BaseModel):
                 {
                     "status": "Y",
                     "authorization_number": "87654321",
-                    "authorization_date": "260123",
+                    "authorization_date": "260123235959",
                     "card_info": {
                         "SERIAL_NUMBER": "9876543210987654",
                         "ACQUIRER_ID": "003",
                         "ACQUIRER_NAME": "우리카드",
                         "ISSUER_ID": "004",
                         "ISSUER_NAME": "하나카드",
-                        "MERCHANT_ID": "MERCHANT002"
+                        "MERCHANT_ID": "MERCHANT002",
+                        "DATE_TIME": "260123235959"
                     },
                     "vankey": "SPAYKEY98765ABCDEFGH1234",
                     "response_code": 0,
@@ -479,7 +507,7 @@ class SamsungPayApproveResponse(BaseModel):
                 {
                     "status": "N",
                     "authorization_number": None,
-                    "authorization_date": "260123",
+                    "authorization_date": None,
                     "card_info": None,
                     "vankey": None,
                     "response_code": 202,
@@ -491,7 +519,7 @@ class SamsungPayApproveResponse(BaseModel):
     
     status: str
     authorization_number: Optional[str]
-    authorization_date: str
+    authorization_date: Optional[str]
     card_info: Optional[CardInfoData]
     vankey: Optional[str]
     response_code: int

@@ -1,4 +1,3 @@
-import logging
 from functools import reduce
 
 from construct import (
@@ -7,14 +6,20 @@ from construct import (
     Bytes,
     Checksum,
     Const,
+    Mapping,
     PaddedString,
     Rebuild,
     Struct,
 )
 
-from .const import ETX, STX, Construct_MessageType
-
-logger = logging.getLogger(__name__)
+from .const import (
+    ETX,
+    STX,
+    AuthorizationType,
+    MessageType,
+    ResponseCode,
+    StatusCode,
+)
 
 
 class BCD(Adapter):
@@ -35,26 +40,35 @@ class BCD(Adapter):
         return decoded
 
 
-def seek_and_read(stream, offset, length):
-    org_pos = stream.tell()
+def _enum_field(subcon, enum_type):
+    return Mapping(subcon, {member: member.value for member in enum_type})
+
+
+def _seek_and_read(stream, offset, length):
+    original_position = stream.tell()
     stream.seek(offset)
     data = stream.read(length)
-    stream.seek(org_pos)
+    stream.seek(original_position)
     return data
 
 
-Length = BCD(Byte[2])
+MessageTypeField = _enum_field(Bytes(2), MessageType)
+ResponseCodeField = _enum_field(Byte, ResponseCode)
+StatusCodeField = _enum_field(Byte, StatusCode)
+AuthorizationTypeField = _enum_field(Byte, AuthorizationType)
 
-Protocol = Struct(
+FrameLength = BCD(Byte[2])
+
+ProtocolFrame = Struct(
     Const(STX),
-    "length" / Rebuild(Length, lambda ctx: len(ctx.payload) + 9),
+    "length" / Rebuild(FrameLength, lambda ctx: len(ctx.payload) + 9),
     "service_code" / PaddedString(2, "ascii"),
-    "message_type" / Construct_MessageType,
+    "message_type" / MessageTypeField,
     "payload" / Bytes(lambda ctx: ctx.length - 9),
     Const(ETX),
     Checksum(
         Byte,
         lambda data: reduce(lambda x, y: x ^ y, data),
-        lambda ctx: seek_and_read(ctx._io, 1, ctx.length - 2),
+        lambda ctx: _seek_and_read(ctx._io, 1, ctx.length - 2),
     ),
 )

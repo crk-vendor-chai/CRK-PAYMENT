@@ -76,7 +76,7 @@ Node 애플리케이션이 접근하는 API 서버와 카드 단말기가 접속
 
 | 환경변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `COMM_TIMEOUT` | `30.0` | 단말기 응답 대기 시간(초) |
+| `COMM_TIMEOUT` | `120.0` | 단말기 응답 대기 시간(초) |
 | `SHUTDOWN_TIMEOUT` | `10.0` | graceful shutdown 시 작업 종료 대기 시간(초) |
 | `API_HOST` | `127.0.0.1` | HTTP API 서버 바인드 주소 |
 | `API_PORT` | `8001` | HTTP API 서버 포트 |
@@ -92,7 +92,7 @@ export API_HOST=0.0.0.0
 export API_PORT=8001
 export CAT_HOST=0.0.0.0
 export CAT_PORT=5000
-export COMM_TIMEOUT=30
+export COMM_TIMEOUT=120
 export SHUTDOWN_TIMEOUT=10
 export LOG_LEVEL=INFO
 export LOG_FORMAT=text
@@ -145,6 +145,19 @@ FastAPI 기본 문서 UI는 실행 후 다음 경로에서 확인할 수 있습�
 예를 들어 기본 설정으로 실행했다면 API 문서 주소는 다음과 같습니다.
 
 - `http://127.0.0.1:8001/docs`
+
+## 결제 통신 핸드셰이크
+
+토큰 생성과 토큰·삼성페이 승인/취소 전문은 TCP-40 개정 규격에 따라 다음 순서로 통신합니다.
+
+1. EdgePC가 `ENQ(0x05)` 3바이트를 전송하고 CAT의 `ACK(0x06)` 3바이트를 기다립니다.
+2. ACK를 받으면 결제 전문(`TQ`, `D8`, `D9`, `D1`, `D7`)을 전송하고 전문 응답을 기다립니다.
+3. EdgePC가 응답 수신에 대한 `ACK(0x06)` 3바이트를 전송합니다.
+4. CAT의 `EOT(0x04)` 3바이트를 받은 뒤 거래를 정상 완료합니다.
+
+ACK와 EOT 대기시간은 각각 3초이며 재시도하지 않습니다. 사전 ACK 실패 또는 응답 ACK/EOT 단계 실패는 통신 오류(HTTP 503), 전문 응답 대기시간 초과는 타임아웃(HTTP 504)으로 반환합니다. `D8`과 `D1` 승인 응답 뒤 CAT가 ACK를 받지 못한 경우의 망취소는 CAT 자체 처리에 맡기며, EdgePC는 별도의 취소 전문을 생성하지 않습니다.
+
+결제 복구와 수동 환불을 위해 `PAYMENT_RECOVERY` INFO 로그에는 승인번호와 함께 전체 `vankey`, `vankey_hash` 값이 마스킹 없이 기록됩니다. 이 로그에는 결제 식별정보가 포함되므로 접근 권한과 보존 기간을 결제 운영 로그 정책에 맞게 제한해야 합니다.
 
 ## 동작 구조
 

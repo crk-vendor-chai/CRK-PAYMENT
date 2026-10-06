@@ -24,6 +24,7 @@ from uvicorn.config import Config
 from uvicorn.server import Server
 
 from api.schemas import (
+    CardInfoData,
     PaymentTokenApproveRequest,
     PaymentTokenApproveResponse,
     PaymentTokenCancelRequest,
@@ -46,7 +47,7 @@ from payment.command import (
     send_tx_token_approve,
     send_tx_token_cancel,
 )
-from payment.payment_types import ItemData
+from payment.models import PaymentItem
 
 logger = logging.getLogger(__name__)
 
@@ -273,8 +274,8 @@ async def get_status(request: Request) -> dict:
     result = await send_device_check(app_state.comm)
     return {
         "status": "ok",
-        "response_code": result["response_code"].value,
-        "message": result["response_code"].name,
+        "response_code": result.response_code.value,
+        "message": result.response_code.name,
     }
 
 
@@ -392,7 +393,7 @@ async def approve_token_payment(
     items = []
     if data.items:
         for item in data.items:
-            items.append(ItemData(
+            items.append(PaymentItem(
                 name=item.name,
                 quantity=item.quantity,
                 total_price=item.total_price,
@@ -405,14 +406,24 @@ async def approve_token_payment(
         items=items,
     )
 
+    domain_card_info = result.card_info
+    if domain_card_info:
+        date_time = domain_card_info.date_time
+    else:
+        date_time = None
+
     return PaymentTokenApproveResponse(
-        status=result["status"].name,
-        authorization_number=result.get("authorization_number"),
-        authorization_date=datetime.now().strftime("%y%m%d"),
-        card_info=result.get("card_info"),
-        vankey=result.get("vankey"),
-        response_code=result["response_code"].value,
-        message=result["message"],
+        status=result.status.name,
+        authorization_number=result.authorization_number,
+        authorization_date=date_time,
+        card_info=(
+            CardInfoData.model_validate(domain_card_info)
+            if domain_card_info is not None
+            else None
+        ),
+        vankey=result.vankey,
+        response_code=result.response_code.value,
+        message=result.message,
     )
 
 
@@ -516,11 +527,15 @@ async def cancel_token_payment(
     )
 
     return PaymentTokenCancelResponse(
-        status=result["status"].name,
-        card_info=result.get("card_info"),
-        vankey=result.get("vankey"),
-        response_code=result["response_code"].value,
-        message=result["message"],
+        status=result.status.name,
+        card_info=(
+            CardInfoData.model_validate(result.card_info)
+            if result.card_info is not None
+            else None
+        ),
+        vankey=result.vankey,
+        response_code=result.response_code.value,
+        message=result.message,
     )
 
 
@@ -638,7 +653,7 @@ async def approve_samsung_pay(
     items = []
     if data.items:
         for item in data.items:
-            items.append(ItemData(
+            items.append(PaymentItem(
                 name=item.name,
                 quantity=item.quantity,
                 total_price=item.total_price,
@@ -651,14 +666,24 @@ async def approve_samsung_pay(
         items=items,
     )
 
+    domain_card_info = result.card_info
+    if domain_card_info:
+        date_time = domain_card_info.date_time
+    else:
+        date_time = None
+
     return SamsungPayApproveResponse(
-        status=result["status"].name,
-        authorization_number=result.get("authorization_number"),
-        authorization_date=datetime.now().strftime("%y%m%d"),
-        card_info=result.get("card_info"),
-        vankey=result.get("vankey"),
-        response_code=result["response_code"].value,
-        message=result["message"],
+        status=result.status.name,
+        authorization_number=result.authorization_number,
+        authorization_date=date_time,
+        card_info=(
+            CardInfoData.model_validate(domain_card_info)
+            if domain_card_info is not None
+            else None
+        ),
+        vankey=result.vankey,
+        response_code=result.response_code.value,
+        message=result.message,
     )
 
 
@@ -762,11 +787,15 @@ async def cancel_samsung_pay(
     )
 
     return SamsungPayCancelResponse(
-        status=result["status"].name,
-        card_info=result.get("card_info"),
-        vankey=result.get("vankey"),
-        response_code=result["response_code"].value,
-        message=result["message"],
+        status=result.status.name,
+        card_info=(
+            CardInfoData.model_validate(result.card_info)
+            if result.card_info is not None
+            else None
+        ),
+        vankey=result.vankey,
+        response_code=result.response_code.value,
+        message=result.message,
     )
 
 

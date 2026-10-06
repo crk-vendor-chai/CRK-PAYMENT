@@ -10,11 +10,12 @@ Supports graceful shutdown via shutdown_event to cleanly terminate event process
 import asyncio
 import logging
 
-from api.schemas import RFIDStream, TokenGeneratedStream
+from api.schemas import CardInfoData, RFIDStream, TokenGeneratedStream
 from exceptions import DeviceError
 from payment.const import ServiceCode, StatusCode
 from payment.manager import Communication
 from payment.command import retrieve_request, send_tx_token_generate
+from payment.models import DeviceInitiatedRequest
 
 logger = logging.getLogger(__name__)
 
@@ -82,8 +83,8 @@ class Action:
                 
                 # Process the device request
                 try:
-                    message, payload = await request_task
-                    await self._handle_device_request(message, payload)
+                    device_request = await request_task
+                    await self._handle_device_request(device_request)
                 except Exception as e:
                     logger.error(f"Error processing device request: {e}", exc_info=True)
                     continue
@@ -92,25 +93,26 @@ class Action:
             self._running = False
             logger.info("Action manager stopped")
     
-    async def _handle_device_request(self, message, payload):
+    async def _handle_device_request(self, request: DeviceInitiatedRequest):
         """
         Handle a single device request.
         
         Args:
-            message: Protocol message from device
-            payload: Parsed payload data
+            request: Parsed device-initiated payment request
         """
-        if message.service_code == ServiceCode.TX_TOKEN_INIT.value:
+        if request.service_code == ServiceCode.TX_TOKEN_INIT:
             await self._handle_token_init()
         
-        elif message.service_code == ServiceCode.TX_SPAY_INIT.value:
+        elif request.service_code == ServiceCode.TX_SPAY_INIT:
             await self._handle_samsung_pay_init()
         
-        elif message.service_code == ServiceCode.TX_RFID_INIT.value:
-            await self._handle_rfid_init(payload)
+        elif request.service_code == ServiceCode.TX_RFID_INIT:
+            if request.rfid_data is None:
+                raise ValueError("RFID request is missing card data")
+            await self._handle_rfid_init(request.rfid_data)
         
         else:
-            logger.warning(f"Unhandled service code: {message.service_code}")
+            logger.warning(f"Unhandled service code: {request.service_code}")
     
     async def _handle_token_init(self):
         """Handle token generation initialization request."""
@@ -120,14 +122,14 @@ class Action:
             tx_token_data = await send_tx_token_generate(self.comm)
             
             # Check status and raise error if failed
-            if tx_token_data["status"] != StatusCode.Y:
+            if tx_token_data.status != StatusCode.Y:
                 logger.warning(
-                    f"Token generation failed with status: {tx_token_data['status']}, "
-                    f"response_code: {tx_token_data['response_code'].name}"
+                    f"Token generation failed with status: {tx_token_data.status}, "
+                    f"response_code: {tx_token_data.response_code.name}"
                 )
                 raise DeviceError(
                     "Token generation failed",
-                    response_code=tx_token_data["response_code"].name,
+                    response_code=tx_token_data.response_code.name,
                 )
             
             # Publish success event
@@ -135,10 +137,14 @@ class Action:
                 "event": "tx_token_generate",
                 "data": TokenGeneratedStream(
                     status='Y',
-                    vankey_hash=tx_token_data["vankey_hash"],
-                    card_info=tx_token_data["card_info"],
-                    response_code=tx_token_data["response_code"].value,
-                    message=tx_token_data["message"],
+                    vankey_hash=tx_token_data.vankey_hash,
+                    card_info=(
+                        CardInfoData.model_validate(tx_token_data.card_info)
+                        if tx_token_data.card_info is not None
+                        else None
+                    ),
+                    response_code=tx_token_data.response_code.value,
+                    message=tx_token_data.message,
                 ).model_dump(),
             })
             
@@ -163,21 +169,21 @@ class Action:
         
         logger.info("Samsung Pay init event published")
     
-    async def _handle_rfid_init(self, payload):
+    async def _handle_rfid_init(self, data: str):
         """
         Handle RFID card read request.
         
         Args:
-            payload: RFID payload with card data
+            data: RFID card data
         """
         logger.debug("Processing TX_RFID_INIT request")
         
         await self.sse_queue.put({
             "event": "rfid_init",
-            "data": RFIDStream(data=payload.data).model_dump(),
+            "data": RFIDStream(data=data).model_dump(),
         })
         
-        logger.info(f"RFID event published: {payload.data[:10]}...")
+        logger.info(f"RFID event published: {data[:10]}...")
     
     async def shutdown(self):
         """

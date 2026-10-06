@@ -6,7 +6,7 @@ application. All configurable values use environment variables with sensible def
 for production and development environments.
 
 Environment Variables:
-    COMM_TIMEOUT: Device communication timeout in seconds (default: 30)
+    COMM_TIMEOUT: Device communication timeout in seconds (default: 120)
     SHUTDOWN_TIMEOUT: Graceful shutdown timeout in seconds (default: 10)
     API_HOST: API server bind address (default: 127.0.0.1)
     API_PORT: API server port (default: 8001)
@@ -65,7 +65,7 @@ class Settings:
             ValueError: If environment variable has invalid value
         """
         try:
-            comm_timeout = float(os.getenv("COMM_TIMEOUT", "30.0"))
+            comm_timeout = float(os.getenv("COMM_TIMEOUT", "120.0"))
             if comm_timeout <= 0:
                 raise ValueError("COMM_TIMEOUT must be positive")
         except ValueError as e:
