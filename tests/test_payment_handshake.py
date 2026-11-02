@@ -13,6 +13,7 @@ from payment.command import (
     send_device_check,
     send_tx_spay_approve,
     send_tx_spay_cancel,
+    send_tx_rfid_receipt,
     send_tx_token_approve,
     send_tx_token_cancel,
     send_tx_token_generate,
@@ -175,6 +176,29 @@ class FrameReaderTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PaymentHandshakeIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_send_only_writes_request_without_waiting_for_response(self):
+        request = ProtocolFrame.build(
+            {
+                "service_code": "PT",
+                "message_type": MessageType.REQUEST,
+                "payload": b"1000\x1c",
+            }
+        )
+        request_received = asyncio.Event()
+        release_handler = asyncio.Event()
+
+        async def cat_handler(reader, writer):
+            received = await read_protocol_bytes(reader)
+            self.assertEqual(received, request)
+            request_received.set()
+            await release_handler.wait()
+
+        async with CommunicationHarness(self, cat_handler) as harness:
+            await asyncio.wait_for(harness.comm.send_only(request), timeout=0.5)
+            await asyncio.wait_for(request_received.wait(), timeout=0.5)
+            self.assertFalse(harness.handler_done.done())
+            release_handler.set()
+
     async def test_normal_flow_waits_for_eot_before_returning(self):
         request = build_protocol("D8", MessageType.REQUEST)
         response = build_protocol("D8", MessageType.RESPONSE)
@@ -517,6 +541,19 @@ class CommandHandshakeSelectionTests(unittest.IsolatedAsyncioTestCase):
             await send_device_check(comm=comm)
 
         self.assertNotIn("control_handshake", comm.fetch.await_args.kwargs)
+
+    async def test_rfid_receipt_uses_one_way_send_without_handshake(self):
+        comm = AsyncMock()
+        await send_tx_rfid_receipt(
+            comm=comm,
+            amount="1000",
+            items=[],
+        )
+
+        comm.send_only.assert_awaited_once()
+        request = ProtocolFrame.parse(comm.send_only.await_args.args[0])
+        self.assertEqual(request.service_code, "PT")
+        self.assertEqual(request.message_type, MessageType.REQUEST)
 
 
 class PaymentRecoveryLoggingTests(unittest.IsolatedAsyncioTestCase):

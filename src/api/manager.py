@@ -14,7 +14,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from fastapi import FastAPI, Request, status
@@ -25,6 +25,7 @@ from uvicorn.server import Server
 
 from api.schemas import (
     CardInfoData,
+    DeviceNoticeRequest,
     PaymentTokenApproveRequest,
     PaymentTokenApproveResponse,
     PaymentTokenCancelRequest,
@@ -33,6 +34,7 @@ from api.schemas import (
     SamsungPayApproveResponse,
     SamsungPayCancelRequest,
     SamsungPayCancelResponse,
+    RfidReceiptRequest,
 )
 from exceptions import (
     PaymentGatewayError,
@@ -42,6 +44,7 @@ from payment.const import AuthorizationType
 from payment.manager import Communication
 from payment.command import (
     send_device_check,
+    send_tx_rfid_receipt,
     send_tx_spay_approve,
     send_tx_spay_cancel,
     send_tx_token_approve,
@@ -68,6 +71,8 @@ class ApplicationState:
     comm: Communication
     sse_queue: asyncio.Queue
     shutdown_event: asyncio.Event
+    status_notice: str = ""
+    status_notice_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def get_app_state(request: Request) -> ApplicationState:
@@ -271,7 +276,59 @@ async def get_status(request: Request) -> dict:
     """
     app_state = get_app_state(request)
     
-    result = await send_device_check(app_state.comm)
+    async with app_state.status_notice_lock:
+        result = await send_device_check(
+            app_state.comm,
+            message=app_state.status_notice,
+        )
+    return {
+        "status": "ok",
+        "response_code": result.response_code.value,
+        "message": result.response_code.name,
+    }
+
+
+@app.put(
+    "/status/notice",
+    response_model=dict,
+    tags=["Status"],
+    summary="Set device notice",
+    description="Display a notice on the CAT device; an empty message clears it",
+)
+async def set_status_notice(
+    request: Request,
+    data: DeviceNoticeRequest,
+) -> dict:
+    app_state = get_app_state(request)
+
+    async with app_state.status_notice_lock:
+        app_state.status_notice = data.message
+        result = await send_device_check(
+            app_state.comm,
+            message=app_state.status_notice,
+        )
+
+    return {
+        "status": "ok",
+        "response_code": result.response_code.value,
+        "message": result.response_code.name,
+    }
+
+
+@app.delete(
+    "/status/notice",
+    response_model=dict,
+    tags=["Status"],
+    summary="Clear device notice",
+    description="Clear the notice displayed on the CAT device",
+)
+async def clear_status_notice(request: Request) -> dict:
+    app_state = get_app_state(request)
+
+    async with app_state.status_notice_lock:
+        app_state.status_notice = ""
+        result = await send_device_check(app_state.comm, message="")
+
     return {
         "status": "ok",
         "response_code": result.response_code.value,
@@ -282,6 +339,35 @@ async def get_status(request: Request) -> dict:
 # ============================================================================
 # Token Payment Endpoints
 # ============================================================================
+
+
+@app.post(
+    "/payment/rfid/receipt",
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["RFID Payment"],
+    summary="Display RF payment receipt",
+    description="Send a one-way PT receipt request to the CAT device",
+)
+async def display_rfid_receipt(
+    request: Request,
+    data: RfidReceiptRequest,
+) -> dict:
+    app_state = get_app_state(request)
+    items = [
+        PaymentItem(
+            name=item.name,
+            quantity=item.quantity,
+            total_price=item.total_price,
+        )
+        for item in data.items
+    ]
+
+    await send_tx_rfid_receipt(
+        comm=app_state.comm,
+        amount=data.amount,
+        items=items,
+    )
+    return {"status": "sent"}
 
 
 @app.post(

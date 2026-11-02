@@ -200,6 +200,29 @@ class Communication:
     async def read_request(self):
         return await self.rx_request_queue.get()
 
+    async def send_only(
+        self,
+        message: bytes,
+        timeout: float | None = None,
+    ) -> None:
+        """Send a one-way CAT request and wait for the socket write to complete."""
+        from config import settings
+
+        if timeout is None:
+            timeout = settings.comm_timeout
+
+        service_code = self._service_code(message)
+
+        async with self.lock:
+            self._ensure_connected(service_code)
+            self._drain_queue(self.rx_transaction_queue)
+            await self._send(
+                message,
+                service_code=service_code,
+                phase="request",
+                timeout=timeout,
+            )
+
     async def fetch(
         self,
         message,

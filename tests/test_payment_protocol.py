@@ -1,19 +1,29 @@
+import asyncio
 import sys
 import unittest
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from construct import ConstructError
+from pydantic import ValidationError as PydanticValidationError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from api.schemas import CardInfoData, TokenGeneratedStream
+from api import manager as api_manager
+from api.schemas import (
+    CardInfoData,
+    DeviceNoticeRequest,
+    RfidReceiptRequest,
+    TokenGeneratedStream,
+)
 from payment.command import (
     retrieve_request,
     send_device_check,
+    send_tx_rfid_receipt,
     send_tx_spay_approve,
     send_tx_spay_cancel,
     send_tx_token_approve,
@@ -46,6 +56,7 @@ from payment.payload import (
     ErrorPayload,
     ItemInfo,
     TransactionRFIDInitializeRequest,
+    TransactionRFIDReceiptRequest,
     TransactionSPayApproveRequest,
     TransactionSPayApproveResponse,
     TransactionSPayCancelRequest,
@@ -191,6 +202,11 @@ class PayloadCompatibilityTests(unittest.TestCase):
                 TransactionTokenApproveRequest,
                 {"amount": "1000", "vankey_hash": vankey_hash, "message": b"I"},
                 b"1000\x1c" + vankey_hash.encode() + b"\x1cI\x1c",
+            ),
+            (
+                TransactionRFIDReceiptRequest,
+                {"amount": "1000", "message": b"I"},
+                b"1000\x1cI\x1c",
             ),
             (
                 TransactionTokenApproveResponse,
@@ -422,6 +438,31 @@ class DomainBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsInstance(device_check, DeviceCheckResult)
 
+    async def test_rfid_receipt_uses_one_way_pt_request(self):
+        comm = AsyncMock()
+        await send_tx_rfid_receipt(
+            comm=comm,
+            amount="1000",
+            items=[PaymentItem(name="커피", quantity=1, total_price=1000)],
+        )
+
+        comm.send_only.assert_awaited_once()
+        request = ProtocolFrame.parse(comm.send_only.await_args.args[0])
+        self.assertEqual(request.service_code, "PT")
+        self.assertEqual(request.message_type, MessageType.REQUEST)
+        self.assertEqual(
+            request.payload,
+            b"1000\x1c"
+            + ItemInfo.build(
+                {
+                    "name": "커피".encode("euc-kr").ljust(10, b"\x00"),
+                    "quantity": b"1\x00",
+                    "total_price": b"1000\x00\x00",
+                }
+            )
+            + b"\x1c",
+        )
+
     async def test_device_request_does_not_expose_construct_container(self):
         comm = AsyncMock()
         comm.read_request.return_value = ProtocolFrame.parse(
@@ -477,3 +518,92 @@ class DomainBoundaryTests(unittest.IsolatedAsyncioTestCase):
             message="ok",
         )
         self.assertEqual(stream.model_dump()["card_info"], expected)
+
+
+class DeviceNoticeAPITests(unittest.IsolatedAsyncioTestCase):
+    def test_receipt_amount_requires_ascii_digits(self):
+        with self.assertRaises(PydanticValidationError):
+            RfidReceiptRequest(amount="１２３")
+
+    def test_notice_rejects_text_not_encodable_as_euc_kr(self):
+        with self.assertRaises(PydanticValidationError):
+            DeviceNoticeRequest(message="🚀")
+
+    async def test_health_check_contract_is_preserved_while_notice_is_active(self):
+        state = api_manager.ApplicationState(
+            comm=AsyncMock(),
+            sse_queue=asyncio.Queue(),
+            shutdown_event=asyncio.Event(),
+        )
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(app_state=state),
+            )
+        )
+        result = DeviceCheckResult(response_code=ResponseCode.SUCCESS)
+
+        with patch.object(
+            api_manager,
+            "send_device_check",
+            new=AsyncMock(return_value=result),
+        ) as send_check:
+            await api_manager.set_status_notice(
+                request,
+                DeviceNoticeRequest(message="서버 연결 오류"),
+            )
+            health = await api_manager.get_status(request)
+
+        self.assertEqual(
+            health,
+            {
+                "status": "ok",
+                "response_code": ResponseCode.SUCCESS.value,
+                "message": ResponseCode.SUCCESS.name,
+            },
+        )
+        self.assertEqual(state.status_notice, "서버 연결 오류")
+        self.assertEqual(
+            [call.kwargs["message"] for call in send_check.await_args_list],
+            ["서버 연결 오류", "서버 연결 오류"],
+        )
+
+        with patch.object(
+            api_manager,
+            "send_device_check",
+            new=AsyncMock(return_value=result),
+        ) as send_check:
+            await api_manager.clear_status_notice(request)
+
+        self.assertEqual(state.status_notice, "")
+        self.assertEqual(send_check.await_args.kwargs["message"], "")
+
+    async def test_rfid_receipt_endpoint_forwards_request_to_pt_command(self):
+        state = api_manager.ApplicationState(
+            comm=AsyncMock(),
+            sse_queue=asyncio.Queue(),
+            shutdown_event=asyncio.Event(),
+        )
+        request = SimpleNamespace(
+            app=SimpleNamespace(
+                state=SimpleNamespace(app_state=state),
+            )
+        )
+        data = RfidReceiptRequest(
+            amount="1000",
+            items=[{"name": "커피", "quantity": 1, "total_price": 1000}],
+        )
+
+        with patch.object(
+            api_manager,
+            "send_tx_rfid_receipt",
+            new=AsyncMock(),
+        ) as send_receipt:
+            response = await api_manager.display_rfid_receipt(request, data)
+
+        self.assertEqual(response, {"status": "sent"})
+        send_receipt.assert_awaited_once()
+        self.assertEqual(send_receipt.await_args.kwargs["amount"], "1000")
+        self.assertEqual(
+            send_receipt.await_args.kwargs["items"],
+            [PaymentItem(name="커피", quantity=1, total_price=1000)],
+        )

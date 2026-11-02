@@ -141,6 +141,41 @@ class Item(BaseModel):
         return v
 
 
+class RfidReceiptRequest(BaseModel):
+    """Receipt details sent to the CAT after an RF card payment."""
+
+    amount: str = Field(
+        ...,
+        description="Transaction amount as a numeric string (1 to 9 digits)",
+        pattern=r"^[0-9]{1,9}$",
+        min_length=1,
+        max_length=9,
+    )
+    items: list[Item] = Field(default_factory=list, max_length=5)
+
+    @field_validator("amount")
+    @classmethod
+    def validate_amount_digits(cls, value: str) -> str:
+        if not value.isascii() or not value.isdigit():
+            raise ValueError("Amount must contain only digits 0-9")
+        return value
+
+
+class DeviceNoticeRequest(BaseModel):
+    """Notice text displayed by the CAT device through a PC request."""
+
+    message: str = Field(..., description="Text to display; empty text clears it")
+
+    @field_validator("message")
+    @classmethod
+    def validate_message_encoding(cls, value: str) -> str:
+        try:
+            value.encode("euc-kr")
+        except UnicodeEncodeError as error:
+            raise ValueError("Message must be encodable as EUC-KR") from error
+        return value
+
+
 # ============================================================================
 # Token Payment Models
 # ============================================================================
@@ -183,7 +218,7 @@ class PaymentTokenApproveRequest(BaseModel):
     amount: str = Field(
         ...,
         description="Transaction amount as numeric string (1 to 9 digits, e.g., '1000' for ₩1,000)",
-        pattern=r"^\d{1,9}$",
+        pattern=r"^[0-9]{1,9}$",
         min_length=1,
         max_length=9,
         examples=["1000", "10000", "100000"],
@@ -219,7 +254,7 @@ class PaymentTokenApproveRequest(BaseModel):
     @classmethod
     def validate_amount_digits(cls, v: str) -> str:
         """Validate amount contains only digits."""
-        if not v.isdigit():
+        if not v.isascii() or not v.isdigit():
             raise ValueError("Amount must contain only digits 0-9")
         return v
 

@@ -96,6 +96,11 @@ TransactionTokenApproveRequest = Struct(
     "message" / _terminated_bytes(FS),
 )
 
+TransactionRFIDReceiptRequest = Struct(
+    "amount" / _terminated_string("ascii", FS),
+    "message" / _terminated_bytes(FS),
+)
+
 TransactionTokenApproveResponse = Struct(
     "status" / StatusCodeField,
     Const(FS),

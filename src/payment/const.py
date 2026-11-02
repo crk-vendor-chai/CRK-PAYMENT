@@ -13,6 +13,7 @@ class ServiceCode(str, Enum):
     TX_SPAY_CANCEL = "D7"
     # RFID
     TX_RFID_INIT = "PR"
+    TX_RFID_RECEIPT = "PT"
     # MISC
     AGE_CHECK = "AC"
     DEVICE_CHECK = "PC"

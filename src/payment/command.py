@@ -46,6 +46,7 @@ from .payload import (
     ErrorPayload,
     ItemInfo,
     TransactionRFIDInitializeRequest,
+    TransactionRFIDReceiptRequest,
     TransactionSPayApproveRequest,
     TransactionSPayApproveResponse,
     TransactionSPayCancelRequest,
@@ -135,9 +136,9 @@ def _validate_amount(amount: str, field_name: str = "amount") -> None:
             value=amount,
         )
     
-    if not amount.isdigit():
+    if not amount.isascii() or not amount.isdigit():
         raise ValidationError(
-            f"{field_name} must contain only digits 0-9",
+            f"{field_name} must contain only ASCII digits 0-9",
             field=field_name,
             value=amount,
         )
@@ -756,9 +757,41 @@ async def send_tx_spay_cancel(
     )
 
 
+async def send_tx_rfid_receipt(
+    comm: Communication,
+    amount: str,
+    items: Sequence[PaymentItem],
+    timeout: float | None = None,
+) -> None:
+    """Send a one-way RF card receipt request to the CAT device."""
+    _validate_amount(amount)
+
+    message = _build_item_message(items)
+    request_payload = TransactionRFIDReceiptRequest.build(
+        {
+            "amount": amount,
+            "message": message,
+        }
+    )
+    request = ProtocolFrame.build(
+        {
+            "service_code": ServiceCode.TX_RFID_RECEIPT.value,
+            "message_type": MessageType.REQUEST,
+            "payload": request_payload,
+        }
+    )
+
+    logger.info(
+        "Sending RF card receipt request",
+        extra={"amount": amount, "item_count": len(items)},
+    )
+    await comm.send_only(request, timeout=timeout)
+
+
 async def send_device_check(
     comm: Communication,
     timeout: float | None = None,
+    message: str = "",
 ) -> DeviceCheckResult:
     """
     Perform device health check.
@@ -766,6 +799,7 @@ async def send_device_check(
     Args:
         comm: Communication instance
         timeout: Response timeout in seconds (uses config default if None)
+        message: Optional notice displayed on the CAT during the health check
         
     Returns:
         Device check data with response code
@@ -779,7 +813,7 @@ async def send_device_check(
     
     request_payload = DeviceCheckRequest.build(
         {
-            "message": "",
+            "message": message,
         }
     )
     request = ProtocolFrame.build(
